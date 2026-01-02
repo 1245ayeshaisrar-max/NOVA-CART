@@ -1,43 +1,90 @@
+import streamlit as st
 import pandas as pd
 import numpy as np
 
-# 1. Load and clean your specific dataset
-df = pd.read_csv('product_ratings.csv')
-df = df.dropna(axis=1, how='all')
-df = df[df['Product Name'].astype(str).str.lower() != 'product name'].reset_index(drop=True)
+# 1. Page Config
+st.set_page_config(page_title="Collaborative Recommender", layout="wide")
 
-# 2. Collaborative Filtering requires User Interaction Data
-# We are creating simulated user ratings (1-5) for your products
-products = df['Product Name'].unique()
-np.random.seed(42)
-num_users = 100
-user_ids = np.random.randint(1, num_users + 1, size=2000)
-product_names = np.random.choice(products, size=2000)
-ratings = np.random.randint(1, 6, size=2000)
+@st.cache_data
+def load_and_clean_data():
+    # Load your product_ratings.csv
+    df = pd.read_csv('product_ratings.csv')
+    # Remove empty columns (Unnamed columns)
+    df = df.dropna(axis=1, how='all')
+    # Filter out header repetitions
+    df = df[df['Product Name'].astype(str).str.lower() != 'product name'].reset_index(drop=True)
+    return df
 
-ratings_df = pd.DataFrame({'User_ID': user_ids, 'Product': product_names, 'Rating': ratings})
-ratings_df = ratings_df.drop_duplicates(['User_ID', 'Product'])
+@st.cache_resource
+def build_collaborative_engine(df):
+    """
+    Collaborative filtering needs Users and Ratings. 
+    Since the CSV is content-only, we generate a synthetic interaction matrix.
+    """
+    products = df['Product Name'].unique()
+    np.random.seed(42)
+    
+    # Simulate 100 users and 2000 ratings
+    num_users = 100
+    user_ids = np.random.randint(1, num_users + 1, size=2000)
+    product_names = np.random.choice(products, size=2000)
+    ratings = np.random.randint(1, 6, size=2000)
+    
+    rdf = pd.DataFrame({'User': user_ids, 'Item': product_names, 'Rating': ratings})
+    rdf = rdf.drop_duplicates(['User', 'Item'])
+    
+    # Pivot to create User-Item Matrix
+    pivot = rdf.pivot(index='Item', columns='User', values='Rating').fillna(0)
+    
+    # Calculate Similarity (Cosine) manually using Numpy
+    vals = pivot.values
+    norms = np.linalg.norm(vals, axis=1, keepdims=True)
+    norms[norms == 0] = 1e-9 # Prevent division by zero
+    normalized_vals = vals / norms
+    similarity_matrix = np.dot(normalized_vals, normalized_vals.T)
+    
+    return pd.DataFrame(similarity_matrix, index=pivot.index, columns=pivot.index)
 
-# 3. Create the User-Item Matrix
-pivot_table = ratings_df.pivot(index='Product', columns='User_ID', values='Rating').fillna(0)
+# --- APP UI ---
+st.title("🛒 Collaborative Recommender System")
+st.markdown("This app uses **Collaborative Filtering** to recommend items based on user behavior.")
 
-# 4. Calculate Similarity between products (Cosine Similarity)
-matrix = pivot_table.values
-norms = np.linalg.norm(matrix, axis=1, keepdims=True)
-norms[norms == 0] = 1e-9
-normalized_matrix = matrix / norms
-similarity_matrix = np.dot(normalized_matrix, normalized_matrix.T)
-sim_df = pd.DataFrame(similarity_matrix, index=pivot_table.index, columns=pivot_table.index)
+try:
+    # Load Data
+    data = load_and_clean_data()
+    sim_df = build_collaborative_engine(data)
+    
+    # Sidebar Search
+    st.sidebar.header("Find Recommendations")
+    product_list = sorted(data['Product Name'].unique())
+    selected_item = st.sidebar.selectbox("Choose a product you like:", product_list)
+    num_recs = st.sidebar.slider("Number of results:", 1, 10, 5)
 
-# 5. Get User Input and Show Output
-print("Available Products:", products[:10])
-user_liked = input("\nEnter a product you like: ").strip()
+    if st.sidebar.button("Recommend"):
+        st.subheader(f"People who liked '{selected_item}' also liked:")
+        
+        if selected_item in sim_df.index:
+            # Get similarity scores and sort
+            results = sim_df[selected_item].sort_values(ascending=False).iloc[1:num_recs+1]
+            
+            # Create columns for the display
+            cols = st.columns(num_recs)
+            for i, (name, score) in enumerate(results.items()):
+                with cols[i]:
+                    # Pull category from the original dataframe
+                    category_info = data[data['Product Name'] == name]['CATEGORY'].values
+                    category = category_info[0] if len(category_info) > 0 else "General"
+                    
+                    st.info(f"**{name}**")
+                    st.write(f"Category: {category}")
+                    st.metric("Similarity", f"{int(score*100)}%")
+        else:
+            st.error("Item not found in the recommendation engine.")
 
-if user_liked in sim_df.index:
-    recs = sim_df[user_liked].sort_values(ascending=False).iloc[1:6]
-    print(f"\nRecommended for you (Based on user behavior):")
-    for name, score in recs.items():
-        category = df[df['Product Name'] == name]['CATEGORY'].values[0]
-        print(f"- {name} (Category: {category}) | Match: {int(score*100)}%")
-else:
-    print("Product not found. Make sure the spelling matches the catalog.")
+    # Show data table
+    with st.expander("Show Product Catalog"):
+        st.dataframe(data)
+
+except Exception as e:
+    st.error("Error: Please make sure 'product_ratings.csv' is in your GitHub repository.")
+    st.write(f"Technical details: {e}")
